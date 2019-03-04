@@ -102,3 +102,7 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+.idea/
+/strategy/file_order/
+*.csv
+file_order/
