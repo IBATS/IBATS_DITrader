@@ -13,7 +13,7 @@ with open("README.md", "r", encoding='utf-8') as rm:
     long_description = rm.read()
 
 setup(name='IBATS_DI_Trader',
-      version='0.1.8',
+      version='0.1.0',
       description='作为IBATS架构的 Trader 端，用于连接Data Integration 平台数据库进行相应的交易及账户信息获取等动作',
       long_description=long_description,
       long_description_content_type='text/markdown',
@@ -41,4 +41,5 @@ setup(name='IBATS_DI_Trader',
           'numpy>=1.14.4',
           'pandas>=0.23.0',
           'SQLAlchemy>=1.2.8',
+          'IBATS_Common>=0.6.18',
       ])
