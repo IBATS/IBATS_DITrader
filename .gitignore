@@ -106,3 +106,4 @@ venv.bak/
 /strategy/file_order/
 *.csv
 file_order/
+/build_upload.bat
