@@ -7,27 +7,36 @@
 @contact : mmmaaaggg@163.com
 @desc    : 
 """
-import json
 import time
-from queue import Queue
 from ibats_common.md import MdAgentBase, md_agent
-from ibats_common.utils.mess import bytes_2_str
 from ibats_common.common import PeriodType, RunMode, ExchangeName
 from ibats_di_trader.backend import engine_md
-from ibats_common.utils.redis import get_channel
-from ibats_di_trader.backend import get_redis
-from ibats_common.utils.db import with_db_session
 import pandas as pd
-from ibats_di_trader.config import config
-
-period_model_dic = {
-    PeriodType.Min1: MDMin1,
-    PeriodType.Hour1: MDMin60,
-    PeriodType.Day1: MDMinDaily,
-}
 
 
 class MdAgentPub(MdAgentBase):
+
+    def __init__(self, instrument_id_list, md_period: PeriodType, exchange_name, agent_name=None,
+                 init_load_md_count=None, init_md_date_from=None, init_md_date_to=None, **kwargs):
+        MdAgentBase.__init__(
+            self, instrument_id_list, md_period, exchange_name, agent_name=agent_name,
+            init_load_md_count=init_load_md_count, init_md_date_from=init_md_date_from,
+            init_md_date_to=init_md_date_to, **kwargs)
+        self.table_name = kwargs['table_name']
+        if 'datetime_key' in kwargs:
+            self.datetime_key = kwargs['datetime_key']
+            self.date_key = None
+            self.time_key = None
+        else:
+            self.datetime_key = None
+            self.date_key = kwargs['date_key']
+            self.time_key = kwargs['time_key']
+        if 'microseconds_key' in kwargs:
+            self.microseconds_key = kwargs['microseconds_key']
+        else:
+            self.microseconds_key = None
+
+        self.factors = kwargs['factors'] if 'factors' in kwargs else None
 
     def load_history(self, date_from=None, date_to=None, load_md_count=None) -> (pd.DataFrame, dict):
         """
@@ -44,156 +53,52 @@ class MdAgentPub(MdAgentBase):
         """
         # 如果 init_md_date_from 以及 init_md_date_to 为空，则不加载历史数据
         if self.init_md_date_from is None and self.init_md_date_to is None:
-            ret_data = {'md_df': None, 'datetime_key': 'ts_start'}
+            ret_data = {'md_df': None, 'datetime_key': self.datetime_key, 'date_key': self.date_key,
+                        'time_key': self.time_key, 'microseconds_key': self.microseconds_key}
             return ret_data
-
-        if self.md_period not in period_model_dic:
-            raise ValueError('%s error' % self.md_period)
 
         # 将sql 语句形势改成由 sqlalchemy 进行sql 拼装方式
         # sql_str = """select * from md_min_1
         #     where InstrumentID in ('j1801') and tradingday>='2017-08-14'
         #     order by ActionDay, ActionTime, ActionMillisec limit 200"""
-        # sql_str = """SELECT * FROM md_min_1
-        # WHERE InstrumentID IN (%s) %s
-        # ORDER BY ActionDay DESC, ActionTime DESC %s"""
-        with with_db_session(engine_md) as session:
-            sub_query = session.query(
-                MDMin1.symbol.label('symbol'), MDMin1.ts_start.label('ts_start'),
-                MDMin1.open.label('open'), MDMin1.high.label('high'),
-                MDMin1.low.label('low'), MDMin1.close.label('close'),
-                MDMin1.vol.label('vol'), MDMin1.amount.label('amount'), MDMin1.count.label('count')
-            ).filter(
-                MDMin1.symbol.in_(self.instrument_id_list)
-            ).order_by(MDMin1.ts_start.desc())
-            # 设置参数
-            params = list(self.instrument_id_list)
-            # date_from 起始日期
-            if date_from is None:
-                date_from = self.init_md_date_from
-            if date_from is not None:
-                # qry_str_date_from = " and tradingday>='%s'" % date_from
-                sub_query = sub_query.filter(MDMin1.ts_start >= date_from)
-                params.append(date_from)
-            # date_to 截止日期
-            if date_to is None:
-                date_to = self.init_md_date_to
-            if date_to is not None:
-                # qry_str_date_to = " and tradingday<='%s'" % date_to
-                sub_query = sub_query.filter(MDMin1.ts_start <= date_to)
-                params.append(date_to)
+        select_clause_str = ', '.join([f"`{item}`" for item in self.factors]) \
+            if self.factors is not None and len(self.factors) > 0 else '*'
+        in_clause_str = ', '.join([f"`{item}`" for item in self.instrument_id_list])
+        order_desc_clause_str = (f' `{self.date_key}` DESC' if self.date_key is not None else '') + \
+                                (f' `{self.datetime_key}` DESC' if self.datetime_key is not None else '') + \
+                                (f' `{self.time_key}` DESC' if self.time_key is not None else '') + \
+                                (f' `{self.microseconds_key}` DESC' if self.microseconds_key is not None else '')
 
-            # load_limit 最大记录数
-            if load_md_count is None:
-                load_md_count = self.init_load_md_count
-            if load_md_count is not None and load_md_count > 0:
-                # qry_str_limit = " limit %d" % load_md_count
-                sub_query = sub_query.limite(load_md_count)
-                params.append(load_md_count)
+        limit_clause_str = 'LIMIT %d' % load_md_count if self.init_load_md_count is not None else ''
+        sub_sql_str = f"""SELECT {select_clause_str} FROM {self.table_name}
+        WHERE {self.symbol_key} IN ({in_clause_str}) %s
+        ORDER BY {order_desc_clause_str} {limit_clause_str}"""
 
-            sub_query = sub_query.subquery('t')
-            query = session.query(
-                sub_query.c.symbol.label('symbol'), sub_query.c.ts_start.label('ts_start'),
-                sub_query.c.open.label('open'), sub_query.c.high.label('high'),
-                sub_query.c.low.label('low'), sub_query.c.close.label('close'),
-                sub_query.c.vol.label('vol'), sub_query.c.amount.label('amount'),
-                sub_query.c.count.label('count')
-            ).order_by(sub_query.c.ts_start)
-            sql_str = str(query)
+        order_clause_str = (f' `{self.date_key}`' if self.date_key is not None else '') + \
+                           (f' `{self.datetime_key}`' if self.datetime_key is not None else '') + \
+                           (f' `{self.time_key}`' if self.time_key is not None else '') + \
+                           (f' `{self.microseconds_key}`' if self.microseconds_key is not None else '')
 
-        # 合约列表
-        # qry_str_inst_list = "'" + "', '".join(self.instrument_id_set) + "'"
-        # 拼接sql
-        # qry_sql_str = sql_str % (qry_str_inst_list, qry_str_date_from + qry_str_date_to, qry_str_limit)
+        sql_str = f"""SELECT {select_clause_str} FROM (
+        {sub_sql_str}
+        ) t ORDER BY {order_clause_str}"""
 
         # 加载历史数据
-        self.logger.debug("%s on:\n%s", params, sql_str)
-        md_df = pd.read_sql(sql_str, engine_md, params=params)
+        self.logger.debug("\n%s", sql_str)
+        md_df = pd.read_sql(sql_str, engine_md)
         # self.md_df = md_df
-        ret_data = {'md_df': md_df, 'datetime_key': 'ts_start', 'symbol_key': 'symbol', 'close_key': 'close'}
+        ret_data = {'md_df': md_df, 'datetime_key': self.datetime_key, 'date_key': self.date_key,
+                    'time_key': self.time_key, 'microseconds_key': self.microseconds_key,
+                    'symbol_key': self.symbol_key, 'close_key': 'close'}
         return ret_data
 
 
-@md_agent(RunMode.Realtime, ExchangeName.HuoBi, is_default=False)
-class MdAgentRealtime(MdAgentPub):
-
-    def __init__(self, instrument_id_list, md_period: PeriodType, name=None, init_load_md_count=None,
-                 init_md_date_from=None, init_md_date_to=None, **kwargs):
-        super().__init__(instrument_id_list, md_period, name=name, init_load_md_count=init_load_md_count,
-                         init_md_date_from=init_md_date_from, init_md_date_to=init_md_date_to, **kwargs)
-        self.pub_sub = None
-        self.md_queue = Queue()
-
-    def connect(self):
-        """链接redis、初始化历史数据"""
-        redis_client = get_redis()
-        self.pub_sub = redis_client.pubsub()
-
-    def release(self):
-        """释放channel资源"""
-        self.pub_sub.close()
-
-    def subscribe(self, instrument_id_set=None):
-        """订阅合约"""
-        super().subscribe(instrument_id_set)
-        if instrument_id_set is None:
-            instrument_id_set = self.instrument_id_set
-        # channel_head = config.REDIS_CHANNEL[self.md_period]
-        # channel_list = [channel_head + instrument_id for instrument_id in instrument_id_set]
-        channel_list = [get_channel(config.MARKET_NAME, self.md_period, instrument_id)
-                        for instrument_id in instrument_id_set]
-        self.pub_sub.psubscribe(*channel_list)
-
-    def run(self):
-        """启动多线程获取MD"""
-        if not self.keep_running:
-            self.keep_running = True
-            for item in self.pub_sub.listen():
-                if self.keep_running:
-                    if item['type'] == 'pmessage':
-                        # self.logger.debug("pmessage:", item)
-                        md_dic_str = bytes_2_str(item['data'])
-                        md_dic = json.loads(md_dic_str)
-                        self.md_queue.put(md_dic)
-                    else:
-                        self.logger.debug("%s response: %s", self.name, item)
-                else:
-                    break
-
-    def unsubscribe(self, instrument_id_set):
-        """退订合约"""
-        if instrument_id_set is None:
-            tmp_set = self.instrument_id_set
-            super().unsubscribe(instrument_id_set)
-            instrument_id_set = tmp_set
-        else:
-            super().unsubscribe(instrument_id_set)
-
-        # channel_head = config.REDIS_CHANNEL[self.md_period]
-        # channel_list = [channel_head + instrument_id for instrument_id in instrument_id_set]
-        channel_list = [get_channel(config.MARKET_NAME, self.md_period, instrument_id)
-                        for instrument_id in instrument_id_set]
-        if self.pub_sub is not None:  # 在回测模式下有可能不进行 connect 调用以及 subscribe 订阅，因此，没有 pub_sub 实例
-            self.pub_sub.punsubscribe(*channel_list)
-
-    def pull(self, timeout=None):
-        """阻塞方式提取合约数据"""
-        md = self.md_queue.get(block=True, timeout=timeout)
-        self.md_queue.task_done()
-        return md
-
-
-@md_agent(RunMode.Backtest, ExchangeName.HuoBi, is_default=False)
+@md_agent(RunMode.Backtest, ExchangeName.DataIntegration, is_default=False)
 class MdAgentBacktest(MdAgentPub):
 
-    def __init__(self, instrument_id_list, md_period: PeriodType, name=None, init_load_md_count=None,
-                 init_md_date_from=None, init_md_date_to=None, **kwargs):
-        super().__init__(instrument_id_list, md_period, name=name, init_load_md_count=init_load_md_count,
-                         init_md_date_from=init_md_date_from, init_md_date_to=init_md_date_to, **kwargs)
+    def __init__(self, **kwargs):
+        MdAgentPub.__init__(self, **kwargs)
         self.timeout = 1
-        self.timestamp_key = 'ts_start'
-        self.symbol_key = 'symbol'
-        self.close_key = 'close'
 
     def connect(self):
         """链接redis、初始化历史数据"""
